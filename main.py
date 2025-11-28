@@ -1,6 +1,6 @@
 import os
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, window, sum as spark_sum, to_json, struct, concat, lit
+from pyspark.sql.functions import col, from_json, window, sum as spark_sum, to_json, struct, concat, lit, lower
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType
 
 SPARK_APP_NAME: str = os.environ.get('SPARK_APP_NAME')
@@ -42,7 +42,7 @@ raw_trades = spark \
     .readStream \
     .format("kafka") \
     .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
-    .option("subscribe", KAFKA_SUBSCRIBE_TOPICS) \
+    .option("subscribePattern", KAFKA_SUBSCRIBE_TOPICS) \
     .option("startingOffsets", "earliest") \
     .option("failOnDataLoss", "false") \
     .load()
@@ -81,17 +81,14 @@ vwap_1min = parsed_trades \
 
 
 def main():
-    # query = vwap_1min \
-    #     .writeStream \
-    #     .outputMode("update") \
-    #     .format("console") \
-    #     .option("truncate", "false") \
-    #     .start()
-    #
-    # query.awaitTermination()
-
-    queryKafka = vwap_1min \
+    output_dataframe = vwap_1min \
         .withColumn("key", concat(col("from_symbol"), lit("_"), col("to_symbol"))) \
+        .withColumn("topic", lower(concat(
+            lit("vwap-1min-"),
+            col("from_symbol"),
+            lit("-"),
+            col("to_symbol")
+        ))) \
         .withColumn("value", to_json(struct(
             col("window_start"),
             col("window_end"),
@@ -101,11 +98,21 @@ def main():
             col("vwap"),
             col("volume")
         ))) \
-        .selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)") \
+        .selectExpr("CAST(topic AS STRING) as topic", "CAST(key AS STRING) as key", "CAST(value AS STRING) as value")
+
+    # Keep console output to check before flooding Kafka with no wanted data
+    # query = output_dataframe \
+    #     .writeStream \
+    #     .outputMode("update") \
+    #     .format("console") \
+    #     .option("truncate", "false") \
+    #     .start()
+    # query.awaitTermination()
+
+    queryKafka =  output_dataframe \
         .writeStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
-        .option("topic", "vwap-1min-eth-usdt") \
         .option("checkpointLocation", "/tmp/vwap-checkpoint") \
         .start()
 
